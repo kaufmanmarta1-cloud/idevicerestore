@@ -137,15 +137,17 @@ jobs:
           echo "Contents of libtatsu directory:"
           ls -la
 
-          # Check for configure.ac or configure.in to regenerate autoconf files
+          # Generate configure and Makefile.in
           if [ -f "configure.ac" ] || [ -f "configure.in" ]; then
-            echo "Found configure.ac/configure.in; regenerating autoconf files..."
-            autoreconf -fiv
+            echo "Found configure.ac/configure.in; regenerating build files..."
+            aclocal
+            autoconf
+            automake --add-missing --copy
           elif [ -f "./autogen.sh" ]; then
             echo "Running autogen.sh..."
             ./autogen.sh
           elif [ ! -f "./configure" ]; then
-            echo "ERROR: Cannot find configure, autogen.sh, or configure.ac/configure.in"
+            echo "ERROR: Cannot find configure, autogen.sh, or configure.ac"
             echo "Available files:"
             find . -maxdepth 2 -type f | head -30
             exit 1
