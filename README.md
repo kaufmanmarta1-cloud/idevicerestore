@@ -1,4 +1,4 @@
-# idevicerestore
+# idevicerestoreю
 
 *A command-line application to restore firmware files to iOS devices.*
 
