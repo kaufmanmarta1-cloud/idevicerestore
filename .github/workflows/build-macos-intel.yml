@@ -18,7 +18,6 @@ jobs:
       STAGING_PREFIX: ${{ github.workspace }}/package/usr/local
       SRC_DIR: ${{ github.workspace }}/src
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-      # libtatsu release to download
       LIBTATSU_VERSION: "1.0.5"
       LIBTATSU_TAR_URL: "https://github.com/libimobiledevice/libtatsu/releases/download/1.0.5/libtatsu-1.0.5.tar.gz"
 
@@ -35,11 +34,34 @@ jobs:
             echo "Xcode CLI tools present"
           fi
 
-      - name: Install Homebrew build tools
+      - name: Determine available OpenSSL and install build tools
         run: |
           set -euo pipefail
           brew update
-          brew install autoconf automake libtool pkg-config gettext openssl@1.1 libzip
+          brew install autoconf automake libtool pkg-config gettext libzip
+
+          # Try to find available OpenSSL formula
+          OPENSSL_FORMULA=""
+          for formula in openssl@3 openssl@3.0 openssl@3.5; do
+            if brew list "$formula" &>/dev/null 2>&1 || brew search "^${formula}$" &>/dev/null 2>&1; then
+              OPENSSL_FORMULA="$formula"
+              break
+            fi
+          done
+
+          if [ -z "$OPENSSL_FORMULA" ]; then
+            echo "No Homebrew OpenSSL formula found; will use system OpenSSL"
+            BREW_OPENSSL=""
+          else
+            echo "Installing $OPENSSL_FORMULA"
+            brew install "$OPENSSL_FORMULA"
+            BREW_OPENSSL="$(brew --prefix "$OPENSSL_FORMULA")"
+          fi
+
+          # Export for subsequent steps
+          echo "BREW_OPENSSL=$BREW_OPENSSL" >> $GITHUB_ENV
+          echo "OPENSSL_FORMULA=$OPENSSL_FORMULA" >> $GITHUB_ENV
+
           export PATH="$(brew --prefix)/opt/gettext/bin:$PATH"
 
       - name: Prepare directories
@@ -55,15 +77,25 @@ jobs:
           echo "Downloading libtatsu ${LIBTATSU_VERSION}"
           curl -L "${LIBTATSU_TAR_URL}" -o "libtatsu-${LIBTATSU_VERSION}.tar.gz"
           tar xzf "libtatsu-${LIBTATSU_VERSION}.tar.gz"
-          # The tar likely extracts to libtatsu-1.0.5 or libtatsu-1.0.5/
           ls -la
 
       - name: Clone & build libimobiledevice dependencies into DEPS_DIR (with libtatsu from release)
         run: |
           set -euo pipefail
           cd "$SRC_DIR"
-          BREW_OPENSSL="$(brew --prefix openssl@1.1)"
-          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+
+          # Setup OpenSSL paths
+          if [ -n "${{ env.BREW_OPENSSL }}" ]; then
+            OPENSSL_PREFIX="${{ env.BREW_OPENSSL }}"
+            CPPFLAGS_OPENSSL="-I${OPENSSL_PREFIX}/include"
+            LDFLAGS_OPENSSL="-L${OPENSSL_PREFIX}/lib"
+          else
+            echo "Using system OpenSSL"
+            CPPFLAGS_OPENSSL=""
+            LDFLAGS_OPENSSL=""
+          fi
+
+          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig${OPENSSL_PREFIX:+:${OPENSSL_PREFIX}/lib/pkgconfig}"
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
 
           build_repo() {
@@ -75,8 +107,8 @@ jobs:
             if [ -f "./autogen.sh" ]; then
               ./autogen.sh
             fi
-            CPPFLAGS="-I${DEPS_DIR}/include -I${BREW_OPENSSL}/include"
-            LDFLAGS="-L${DEPS_DIR}/lib -L${BREW_OPENSSL}/lib"
+            CPPFLAGS="-I${DEPS_DIR}/include ${CPPFLAGS_OPENSSL}"
+            LDFLAGS="-L${DEPS_DIR}/lib ${LDFLAGS_OPENSSL}"
             ./configure --prefix="$DEPS_DIR" \
                         CPPFLAGS="$CPPFLAGS" \
                         LDFLAGS="$LDFLAGS" \
@@ -92,20 +124,20 @@ jobs:
 
           # Build libtatsu from extracted release source
           echo "=== Building libtatsu from release tarball into $DEPS_DIR ==="
-          # try typical extracted dir names
           if [ -d "libtatsu-${LIBTATSU_VERSION}" ]; then
             cd "libtatsu-${LIBTATSU_VERSION}"
           else
-            # fallback: find first dir named libtatsu*
             cd libtatsu*
           fi
           if [ -f "./autogen.sh" ]; then
             ./autogen.sh
           fi
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
+          CPPFLAGS="-I${DEPS_DIR}/include ${CPPFLAGS_OPENSSL}"
+          LDFLAGS="-L${DEPS_DIR}/lib ${LDFLAGS_OPENSSL}"
           ./configure --prefix="$DEPS_DIR" \
-                      CPPFLAGS="-I${DEPS_DIR}/include -I${BREW_OPENSSL}/include" \
-                      LDFLAGS="-L${DEPS_DIR}/lib -L${BREW_OPENSSL}/lib" \
+                      CPPFLAGS="$CPPFLAGS" \
+                      LDFLAGS="$LDFLAGS" \
                       PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
           make -j$(sysctl -n hw.logicalcpu)
           make install
@@ -136,9 +168,8 @@ jobs:
             if [ -f "./autogen.sh" ]; then
               ./autogen.sh
             fi
-            CPPFLAGS="-I${DEPS_DIR}/include -I${BREW_OPENSSL}/include"
-            LDFLAGS="-L${DEPS_DIR}/lib -L${BREW_OPENSSL}/lib"
-            # explicit fallback variables
+            CPPFLAGS="-I${DEPS_DIR}/include ${CPPFLAGS_OPENSSL}"
+            LDFLAGS="-L${DEPS_DIR}/lib ${LDFLAGS_OPENSSL}"
             libtatsu_CFLAGS="-I${DEPS_DIR}/include"
             libtatsu_LIBS="-L${DEPS_DIR}/lib -ltatsu"
             ./configure --prefix="$DEPS_DIR" \
@@ -153,14 +184,21 @@ jobs:
           fi
 
       - name: Configure & build idevicerestore using local deps
-        env:
-          PKG_CONFIG_PATH: ${{ github.workspace }}/deps/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig
         run: |
           set -euo pipefail
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
-          export CPPFLAGS="-I${DEPS_DIR}/include -I$(brew --prefix openssl@1.1)/include"
-          export LDFLAGS="-L${DEPS_DIR}/lib -L$(brew --prefix openssl@1.1)/lib"
-          export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}"
+
+          if [ -n "${{ env.BREW_OPENSSL }}" ]; then
+            OPENSSL_PREFIX="${{ env.BREW_OPENSSL }}"
+            export CPPFLAGS="-I${DEPS_DIR}/include -I${OPENSSL_PREFIX}/include"
+            export LDFLAGS="-L${DEPS_DIR}/lib -L${OPENSSL_PREFIX}/lib"
+            export PKG_CONFIG_PATH="${DEPS_DIR}/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig"
+          else
+            export CPPFLAGS="-I${DEPS_DIR}/include"
+            export LDFLAGS="-L${DEPS_DIR}/lib"
+            export PKG_CONFIG_PATH="${DEPS_DIR}/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+          fi
+
           ./autogen.sh || true
           ./configure --prefix="$DEPS_DIR" \
                       CPPFLAGS="$CPPFLAGS" \
