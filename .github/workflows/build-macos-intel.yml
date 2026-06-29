@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-macos-intel:
     name: Build on macOS (Intel) and bundle deps
-    runs-on: macos-11
+    runs-on: macos-latest
     env:
       DEPS_DIR: ${{ github.workspace }}/deps
       STAGING_PREFIX: ${{ github.workspace }}/package/usr/local
