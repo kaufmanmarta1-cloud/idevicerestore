@@ -130,20 +130,23 @@ jobs:
           if [ -d "libtatsu-${LIBTATSU_VERSION}" ]; then
             cd "libtatsu-${LIBTATSU_VERSION}"
           else
-            cd libtatsu*
+            cd libtatsu* || exit 1
           fi
 
           # List contents for debugging
           echo "Contents of libtatsu directory:"
           ls -la
 
-          # Try autogen if available, otherwise use pre-built configure
-          if [ -f "./autogen.sh" ]; then
+          # Check for configure.ac or configure.in to regenerate autoconf files
+          if [ -f "configure.ac" ] || [ -f "configure.in" ]; then
+            echo "Found configure.ac/configure.in; regenerating autoconf files..."
+            autoreconf -fiv
+          elif [ -f "./autogen.sh" ]; then
             echo "Running autogen.sh..."
             ./autogen.sh
           elif [ ! -f "./configure" ]; then
-            echo "ERROR: Neither autogen.sh nor configure found"
-            echo "Directory listing:"
+            echo "ERROR: Cannot find configure, autogen.sh, or configure.ac/configure.in"
+            echo "Available files:"
             find . -maxdepth 2 -type f | head -30
             exit 1
           fi
