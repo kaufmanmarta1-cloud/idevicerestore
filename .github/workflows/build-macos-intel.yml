@@ -15,8 +15,9 @@ jobs:
     runs-on: macos-11
     env:
       DEPS_DIR: ${{ github.workspace }}/deps
+      STAGING_PREFIX: ${{ github.workspace }}/package/usr/local
       SRC_DIR: ${{ github.workspace }}/src
-      INSTALL_STAGING: ${{ github.workspace }}/package
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
       - name: Checkout
@@ -33,42 +34,45 @@ jobs:
 
       - name: Install Homebrew build tools
         run: |
-          set -e
+          set -euo pipefail
           brew update
           brew install autoconf automake libtool pkg-config gettext openssl@1.1 libzip
           export PATH="$(brew --prefix)/opt/gettext/bin:$PATH"
 
       - name: Prepare directories
         run: |
-          set -e
-          rm -rf "$DEPS_DIR" "$SRC_DIR" "$INSTALL_STAGING"
-          mkdir -p "$DEPS_DIR" "$SRC_DIR" "$INSTALL_STAGING"
+          set -euo pipefail
+          rm -rf "$DEPS_DIR" "$SRC_DIR" "${{ env.STAGING_PREFIX }}"
+          mkdir -p "$DEPS_DIR" "$SRC_DIR" "$(dirname "${{ env.STAGING_PREFIX }}")"
 
-      - name: Clone and build dependencies into DEPS_DIR
+      - name: Clone & build libimobiledevice dependencies into DEPS_DIR
         run: |
-          set -e
+          set -euo pipefail
           cd "$SRC_DIR"
+          BREW_OPENSSL="$(brew --prefix openssl@1.1)"
+          export PKG_CONFIG_PATH="$DEPS_DIR/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+          export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
 
-          # Helper to clone, autogen/configure, build, install
           build_repo() {
             repo="$1"
-            name="$2"
-            git clone --depth 1 "https://github.com/libimobiledevice/${repo}.git" "$name"
-            cd "$name"
-            if [ -f ./autogen.sh ]; then
+            dir="$2"
+            echo "=== Building $repo into $DEPS_DIR ==="
+            git clone --depth 1 "https://github.com/libimobiledevice/${repo}.git" "$dir"
+            cd "$dir"
+            if [ -f "./autogen.sh" ]; then
               ./autogen.sh
             fi
-            # Use local prefix for install
+            CPPFLAGS="-I${DEPS_DIR}/include -I${BREW_OPENSSL}/include"
+            LDFLAGS="-L${DEPS_DIR}/lib -L${BREW_OPENSSL}/lib"
             ./configure --prefix="$DEPS_DIR" \
-                        CPPFLAGS="-I${DEPS_DIR}/include -I$(brew --prefix openssl@1.1)/include" \
-                        LDFLAGS="-L${DEPS_DIR}/lib -L$(brew --prefix openssl@1.1)/lib" \
-                        PKG_CONFIG_PATH="${DEPS_DIR}/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+                        CPPFLAGS="$CPPFLAGS" \
+                        LDFLAGS="$LDFLAGS" \
+                        PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
             make -j$(sysctl -n hw.logicalcpu)
             make install
             cd ..
           }
 
-          # Build order matters (libplist first)
           build_repo libplist libplist
           build_repo libimobiledevice-glue libimobiledevice-glue
           build_repo libusbmuxd libusbmuxd
@@ -79,49 +83,107 @@ jobs:
       - name: Configure & build idevicerestore using local deps
         env:
           PKG_CONFIG_PATH: ${{ github.workspace }}/deps/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig
-          CPPFLAGS: "-I${{ github.workspace }}/deps/include -I$(brew --prefix openssl@1.1)/include"
-          LDFLAGS: "-L${{ github.workspace }}/deps/lib -L$(brew --prefix openssl@1.1)/lib"
         run: |
-          set -e
-          # some releases are from tarball, try autogen then configure
+          set -euo pipefail
+          export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
+          export CPPFLAGS="-I${DEPS_DIR}/include -I$(brew --prefix openssl@1.1)/include"
+          export LDFLAGS="-L${DEPS_DIR}/lib -L$(brew --prefix openssl@1.1)/lib"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}"
           ./autogen.sh || true
           ./configure --prefix="$DEPS_DIR" \
-                      PKG_CONFIG_PATH="$PKG_CONFIG_PATH" \
                       CPPFLAGS="$CPPFLAGS" \
-                      LDFLAGS="$LDFLAGS"
+                      LDFLAGS="$LDFLAGS" \
+                      PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
           make -j$(sysctl -n hw.logicalcpu)
           make install
 
       - name: Stage installation for packaging
         run: |
-          set -e
-          # create a package folder that contains bin/ lib/ include/ relative to root
-          rm -rf "$INSTALL_STAGING"
-          mkdir -p "$INSTALL_STAGING"
-          # copy deps tree (contains bin/, lib/, include/) into staging
-          cp -a "$DEPS_DIR"/* "$INSTALL_STAGING" || true
-          # For convenience, place idevicerestore under package/usr/local/bin if consumers expect /usr/local layout:
-          mkdir -p "$INSTALL_STAGING/usr/local"
-          cp -a "$DEPS_DIR"/* "$INSTALL_STAGING/usr/local/" || true
-          tar -czf idevicerestore-macos-intel-with-deps.tar.gz -C "$INSTALL_STAGING" .
+          set -euo pipefail
+          mkdir -p "${{ env.STAGING_PREFIX }}"
+          cp -a "${{ env.DEPS_DIR }}/." "${{ env.STAGING_PREFIX }}/" || true
 
-      - name: Run self-checks using bundled libs
+      - name: Add helper scripts from repo to staging (if present)
         run: |
-          set -e || true
-          export DYLD_LIBRARY_PATH="${DEPS_DIR}/lib:${DYLD_LIBRARY_PATH:-}"
-          if [ -x "${DEPS_DIR}/bin/idevicerestore" ]; then
-            echo "Running idevicerestore --help using DYLD_LIBRARY_PATH=${DEPS_DIR}/lib"
-            "${DEPS_DIR}/bin/idevicerestore" --help | head -n 20 || true
-          elif [ -x "${INSTALL_STAGING}/usr/local/bin/idevicerestore" ]; then
-            "${INSTALL_STAGING}/usr/local/bin/idevicerestore" --help | head -n 20 || true
-          else
-            echo "idevicerestore binary not found in staging; build may have failed"
-            ls -la "${DEPS_DIR}" || true
+          set -euo pipefail
+          # copy repository scripts if they exist so package includes run helper
+          if [ -d "${{ github.workspace }}/scripts" ]; then
+            cp -a "${{ github.workspace }}/scripts" "${{ env.STAGING_PREFIX }}/" || true
           fi
 
-      - name: Upload build package
+      - name: Fix dylib ids and rpaths so binary uses bundled libs
+        run: |
+          set -euo pipefail
+          PREFIX="${{ env.STAGING_PREFIX }}"
+          LIB_DIR="$PREFIX/lib"
+          BIN_DIR="$PREFIX/bin"
+
+          if [ ! -d "$PREFIX" ]; then
+            echo "Staging prefix not found: $PREFIX"
+            exit 1
+          fi
+
+          for dylib in "$LIB_DIR"/*.dylib; do
+            [ -e "$dylib" ] || continue
+            name="$(basename "$dylib")"
+            install_name_tool -id "@rpath/$name" "$dylib"
+          done
+
+          targets=()
+          if [ -d "$BIN_DIR" ]; then
+            for f in "$BIN_DIR"/*; do
+              [ -e "$f" ] || continue
+              targets+=("$f")
+            done
+          fi
+          for f in "$LIB_DIR"/*.dylib; do
+            [ -e "$f" ] || continue
+            targets+=("$f")
+          done
+
+          for target in "${targets[@]}"; do
+            otool -L "$target" | tail -n +2 | awk '{print $1}' | while read -r lib; do
+              [ -z "$lib" ] && continue
+              case "$lib" in
+                /usr/lib/*|/System/*) ;;
+                @rpath/*|@loader_path/*|@executable_path/*) ;;
+                *)
+                  base="$(basename "$lib")"
+                  install_name_tool -change "$lib" "@rpath/$base" "$target" || true
+                  ;;
+              esac
+            done
+            if ! otool -l "$target" | grep -q '@executable_path/../lib'; then
+              install_name_tool -add_rpath "@executable_path/../lib" "$target" 2>/dev/null || true
+            fi
+          done
+
+      - name: Create tarballs of staged installation and libs-only
+        run: |
+          set -euo pipefail
+          cd "$(dirname "${{ env.STAGING_PREFIX }}")"
+          tar -czf "${{ github.workspace }}/idevicerestore-macos-intel-with-deps.tar.gz" "$(basename "${{ env.STAGING_PREFIX }}")"
+          # libs-only (useful for distributing only libraries)
+          mkdir -p "${{ github.workspace }}/libs-only"
+          cp -a "${{ env.STAGING_PREFIX }}/lib" "${{ github.workspace }}/libs-only/" || true
+          tar -czf "${{ github.workspace }}/idevicerestore-libs-only.tar.gz" -C "${{ github.workspace }}/libs-only" lib
+
+      - name: Run self-checks using bundled libs (optional)
+        run: |
+          set -euo pipefail
+          BIN="${{ env.STAGING_PREFIX }}/bin/idevicerestore"
+          if [ -x "$BIN" ]; then
+            export DYLD_LIBRARY_PATH="${{ env.STAGING_PREFIX }}/lib:${DYLD_LIBRARY_PATH:-}"
+            "$BIN" --help | head -n 20 || true
+          else
+            echo "Binary not found at $BIN; skipping runtime check"
+            ls -la "${{ env.STAGING_PREFIX }}" || true
+          fi
+
+      - name: Upload build packages
         uses: actions/upload-artifact@v4
         with:
           name: idevicerestore-macos-intel-with-deps
           path: |
             idevicerestore-macos-intel-with-deps.tar.gz
+            idevicerestore-libs-only.tar.gz
