@@ -77,6 +77,7 @@ jobs:
           echo "Downloading libtatsu ${LIBTATSU_VERSION}"
           curl -L "${LIBTATSU_TAR_URL}" -o "libtatsu-${LIBTATSU_VERSION}.tar.bz2"
           tar xjf "libtatsu-${LIBTATSU_VERSION}.tar.bz2"
+          echo "Contents of $SRC_DIR:"
           ls -la
 
       - name: Clone & build libimobiledevice dependencies into DEPS_DIR (with libtatsu from release)
@@ -105,10 +106,12 @@ jobs:
             git clone --depth 1 "https://github.com/libimobiledevice/${repo}.git" "$dir"
             cd "$dir"
             if [ -f "./autogen.sh" ]; then
+              echo "Running autogen.sh for $repo"
               ./autogen.sh
             fi
             CPPFLAGS="-I${DEPS_DIR}/include ${CPPFLAGS_OPENSSL}"
             LDFLAGS="-L${DEPS_DIR}/lib ${LDFLAGS_OPENSSL}"
+            echo "Configuring $repo with CPPFLAGS=$CPPFLAGS LDFLAGS=$LDFLAGS"
             ./configure --prefix="$DEPS_DIR" \
                         CPPFLAGS="$CPPFLAGS" \
                         LDFLAGS="$LDFLAGS" \
@@ -129,12 +132,26 @@ jobs:
           else
             cd libtatsu*
           fi
+
+          # List contents for debugging
+          echo "Contents of libtatsu directory:"
+          ls -la
+
+          # Try autogen if available, otherwise use pre-built configure
           if [ -f "./autogen.sh" ]; then
+            echo "Running autogen.sh..."
             ./autogen.sh
+          elif [ ! -f "./configure" ]; then
+            echo "ERROR: Neither autogen.sh nor configure found"
+            echo "Directory listing:"
+            find . -maxdepth 2 -type f | head -30
+            exit 1
           fi
-          export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}"
+
+          # Now configure and build
           CPPFLAGS="-I${DEPS_DIR}/include ${CPPFLAGS_OPENSSL}"
           LDFLAGS="-L${DEPS_DIR}/lib ${LDFLAGS_OPENSSL}"
+          echo "Configuring libtatsu with CPPFLAGS=$CPPFLAGS LDFLAGS=$LDFLAGS"
           ./configure --prefix="$DEPS_DIR" \
                       CPPFLAGS="$CPPFLAGS" \
                       LDFLAGS="$LDFLAGS" \
@@ -199,6 +216,7 @@ jobs:
             export PKG_CONFIG_PATH="${DEPS_DIR}/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
           fi
 
+          echo "Configuring idevicerestore with CPPFLAGS=$CPPFLAGS LDFLAGS=$LDFLAGS PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
           ./autogen.sh || true
           ./configure --prefix="$DEPS_DIR" \
                       CPPFLAGS="$CPPFLAGS" \
@@ -212,6 +230,8 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ env.STAGING_PREFIX }}"
           cp -a "${{ env.DEPS_DIR }}/." "${{ env.STAGING_PREFIX }}/" || true
+          echo "Staged installation contents:"
+          ls -la "${{ env.STAGING_PREFIX }}"
 
       - name: Fix dylib ids and rpaths so binary uses bundled libs
         run: |
@@ -225,9 +245,11 @@ jobs:
             exit 1
           fi
 
+          echo "Fixing dylib ids in $LIB_DIR"
           for dylib in "$LIB_DIR"/*.dylib; do
             [ -e "$dylib" ] || continue
             name="$(basename "$dylib")"
+            echo "  Setting id: $dylib -> @rpath/$name"
             install_name_tool -id "@rpath/$name" "$dylib"
           done
 
@@ -243,7 +265,9 @@ jobs:
             targets+=("$f")
           done
 
+          echo "Rewriting library references and adding rpath to targets"
           for target in "${targets[@]}"; do
+            echo "Processing: $target"
             otool -L "$target" | tail -n +2 | awk '{print $1}' | while read -r lib; do
               [ -z "$lib" ] && continue
               case "$lib" in
@@ -251,23 +275,38 @@ jobs:
                 @rpath/*|@loader_path/*|@executable_path/*) ;;
                 *)
                   base="$(basename "$lib")"
+                  echo "  Changing $lib -> @rpath/$base"
                   install_name_tool -change "$lib" "@rpath/$base" "$target" || true
                   ;;
               esac
             done
             if ! otool -l "$target" | grep -q '@executable_path/../lib'; then
+              echo "  Adding rpath @executable_path/../lib"
               install_name_tool -add_rpath "@executable_path/../lib" "$target" 2>/dev/null || true
             fi
+          done
+
+          echo "Verification of dylib references:"
+          for target in "${targets[@]}"; do
+            [ -e "$target" ] || continue
+            echo "---- $target ----"
+            otool -L "$target"
           done
 
       - name: Create tarballs of staged installation and libs-only
         run: |
           set -euo pipefail
           cd "$(dirname "${{ env.STAGING_PREFIX }}")"
+          echo "Creating tarball of staged installation..."
           tar -czf "${{ github.workspace }}/idevicerestore-macos-intel-with-deps.tar.gz" "$(basename "${{ env.STAGING_PREFIX }}")"
+          
+          echo "Creating libs-only tarball..."
           mkdir -p "${{ github.workspace }}/libs-only"
           cp -a "${{ env.STAGING_PREFIX }}/lib" "${{ github.workspace }}/libs-only/" || true
           tar -czf "${{ github.workspace }}/idevicerestore-libs-only.tar.gz" -C "${{ github.workspace }}/libs-only" lib
+
+          echo "Tarballs created:"
+          ls -lh "${{ github.workspace }}"/*.tar.gz
 
       - name: Run self-checks using bundled libs (optional)
         run: |
@@ -275,6 +314,7 @@ jobs:
           BIN="${{ env.STAGING_PREFIX }}/bin/idevicerestore"
           if [ -x "$BIN" ]; then
             export DYLD_LIBRARY_PATH="${{ env.STAGING_PREFIX }}/lib:${DYLD_LIBRARY_PATH:-}"
+            echo "Running $BIN --help with DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"
             "$BIN" --help | head -n 20 || true
           else
             echo "Binary not found at $BIN; skipping runtime check"
