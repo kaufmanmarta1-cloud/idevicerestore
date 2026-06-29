@@ -222,11 +222,14 @@ jobs:
           fi
 
           echo "Configuring idevicerestore with CPPFLAGS=$CPPFLAGS LDFLAGS=$LDFLAGS PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-          ./autogen.sh || true
+          if [ -x ./autogen.sh ]; then
+              ./autogen.sh
+          fi
+          
           ./configure --prefix="$DEPS_DIR" \
-                      CPPFLAGS="$CPPFLAGS" \
-                      LDFLAGS="$LDFLAGS" \
-                      PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
+              CPPFLAGS="$CPPFLAGS" \
+              LDFLAGS="$LDFLAGS" \
+              PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
           make -j$(sysctl -n hw.logicalcpu)
           make install
 
